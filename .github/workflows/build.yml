@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       full_core:
-        description: 同时应用 Core 补丁并构建整个框架（耗时较长）
+        description: Apply the core patch and build the whole framework (slow)
         type: boolean
         default: true
 
@@ -22,22 +22,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 拉取框架源码
+      - name: Checkout framework
         shell: pwsh
         run: |
-          git clone --depth 1 --branch   framework
+          git clone --depth 1 --branch $env:FRAMEWORK_REF $env:FRAMEWORK_REPO framework
           if (!(Test-Path framework/include/anomaly/sdk/cpp.hpp)) {
             throw 'framework checkout does not contain the plugin SDK'
           }
 
-      - name: 放置插件源码
+      - name: Stage plugin sources
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path framework/plugins/AnomalyDamageChain -Force | Out-Null
-          Copy-Item plugin/plugin.cpp    framework/plugins/AnomalyDamageChain/plugin.cpp  -Force
-          Copy-Item plugin/manifest.json framework/plugins/AnomalyDamageChain/manifest.json -Force
+          Copy-Item plugin/plugin.cpp     framework/plugins/AnomalyDamageChain/plugin.cpp  -Force
+          Copy-Item plugin/manifest.json  framework/plugins/AnomalyDamageChain/manifest.json -Force
 
-      - name: 生成插件构建工程
+      - name: Configure and build plugin
         shell: pwsh
         run: |
           $root = (Resolve-Path framework).Path -replace '\\','/'
@@ -65,18 +65,16 @@ jobs:
           cmake -S $src -B .build/plugin -G "Visual Studio 17 2022" -A x64
           cmake --build .build/plugin --config Release --parallel
 
-      - name: 校验产物与导出
+      - name: Verify artifact and exports
         shell: pwsh
         run: |
           $dll = '.build/plugin/out/AnomalyDamageChain/plugin.dll'
-          if (!(Test-Path $dll)) { throw "plugin.dll 未生成: $dll" }
-          $bytes = [IO.File]::ReadAllBytes($dll)
-          $text  = [Text.Encoding]::ASCII.GetString($bytes)
+          if (!(Test-Path $dll)) { throw "plugin.dll was not produced: $dll" }
+          $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($dll))
           foreach ($symbol in 'AnomalyPluginEntryV1','AnomalyPluginCxxThrowV1') {
-            if ($text -notmatch [regex]::Escape($symbol)) { throw "缺少导出: $symbol" }
+            if ($text -notmatch [regex]::Escape($symbol)) { throw "missing export: $symbol" }
           }
-          $size = (Get-Item $dll).Length
-          Write-Host "plugin.dll $size 字节，导出检查通过"
+          Write-Host ("plugin.dll {0} bytes, exports verified" -f (Get-Item $dll).Length)
           New-Item -ItemType Directory -Path out -Force | Out-Null
           Copy-Item $dll out/plugin.dll -Force
           Copy-Item plugin/manifest.json out/manifest.json -Force
@@ -94,11 +92,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 拉取框架源码
+      - name: Checkout framework
+        shell: pwsh
         run: |
-          git clone --depth 1 --branch   framework
+          git clone --depth 1 --branch $env:FRAMEWORK_REF $env:FRAMEWORK_REPO framework
 
-      - name: 应用 Core 补丁
+      - name: Apply core patch
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -108,7 +107,7 @@ jobs:
           Copy-Item plugin/plugin.cpp    framework/plugins/AnomalyDamageChain/plugin.cpp -Force
           Copy-Item plugin/manifest.json framework/plugins/AnomalyDamageChain/manifest.json -Force
 
-      - name: 配置并构建框架
+      - name: Configure and build framework
         shell: pwsh
         working-directory: framework
         run: |
