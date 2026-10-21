@@ -1,0 +1,124 @@
+name: build
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      full_core:
+        description: 同时应用 Core 补丁并构建整个框架（耗时较长）
+        type: boolean
+        default: true
+
+env:
+  FRAMEWORK_REPO: https://github.com/Rabb1t79/Anomaly-main.git
+  FRAMEWORK_REF: c64a2a39
+
+jobs:
+  plugin:
+    name: plugin.dll (x64, Release)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 拉取框架源码
+        shell: pwsh
+        run: |
+          git clone --filter=blob:none --no-checkout $env:FRAMEWORK_REPO framework
+          git -C framework checkout $env:FRAMEWORK_REF
+          if (!(Test-Path framework/include/anomaly/sdk/cpp.hpp)) {
+            throw 'framework checkout does not contain the plugin SDK'
+          }
+
+      - name: 放置插件源码
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path framework/plugins/AnomalyDamageChain -Force | Out-Null
+          Copy-Item plugin/plugin.cpp    framework/plugins/AnomalyDamageChain/plugin.cpp  -Force
+          Copy-Item plugin/manifest.json framework/plugins/AnomalyDamageChain/manifest.json -Force
+
+      - name: 生成插件构建工程
+        shell: pwsh
+        run: |
+          $root = (Resolve-Path framework).Path -replace '\\','/'
+          $src  = Join-Path $env:GITHUB_WORKSPACE '.build/plugin-src'
+          New-Item -ItemType Directory -Path $src -Force | Out-Null
+          $cmake = @'
+          cmake_minimum_required(VERSION 3.22)
+          project(AnomalyDamageChainPlugin LANGUAGES CXX)
+          set(CMAKE_CXX_STANDARD 20)
+          set(CMAKE_CXX_STANDARD_REQUIRED ON)
+          set(CMAKE_CXX_EXTENSIONS OFF)
+          set(ANOMALY_SOURCE_ROOT "@ROOT@")
+          add_library(anomaly_damage_chain SHARED
+            "${ANOMALY_SOURCE_ROOT}/plugins/AnomalyDamageChain/plugin.cpp"
+            "${ANOMALY_SOURCE_ROOT}/sdk/cpp/plugin_cxx_throw_bridge.cpp")
+          target_include_directories(anomaly_damage_chain PRIVATE "${ANOMALY_SOURCE_ROOT}/include")
+          target_compile_definitions(anomaly_damage_chain PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+          target_compile_options(anomaly_damage_chain PRIVATE /W4 /permissive-)
+          set_target_properties(anomaly_damage_chain PROPERTIES
+            OUTPUT_NAME "plugin" PREFIX ""
+            RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/out/AnomalyDamageChain"
+            LIBRARY_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/out/AnomalyDamageChain")
+          '@
+          $cmake.Replace('@ROOT@', $root) | Set-Content -LiteralPath (Join-Path $src 'CMakeLists.txt') -Encoding UTF8
+          cmake -S $src -B .build/plugin -G "Visual Studio 17 2022" -A x64
+          cmake --build .build/plugin --config Release --parallel
+
+      - name: 校验产物与导出
+        shell: pwsh
+        run: |
+          $dll = '.build/plugin/out/AnomalyDamageChain/plugin.dll'
+          if (!(Test-Path $dll)) { throw "plugin.dll 未生成: $dll" }
+          $bytes = [IO.File]::ReadAllBytes($dll)
+          $text  = [Text.Encoding]::ASCII.GetString($bytes)
+          foreach ($symbol in 'AnomalyPluginEntryV1','AnomalyPluginCxxThrowV1') {
+            if ($text -notmatch [regex]::Escape($symbol)) { throw "缺少导出: $symbol" }
+          }
+          $size = (Get-Item $dll).Length
+          Write-Host "plugin.dll $size 字节，导出检查通过"
+          New-Item -ItemType Directory -Path out -Force | Out-Null
+          Copy-Item $dll out/plugin.dll -Force
+          Copy-Item plugin/manifest.json out/manifest.json -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: anomaly-damage-chain-plugin
+          path: out/
+          if-no-files-found: error
+
+  core:
+    name: core patch (apply + build)
+    if: github.event_name == 'workflow_dispatch' && inputs.full_core
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 拉取框架源码
+        run: |
+          git clone $env:FRAMEWORK_REPO framework
+          git -C framework checkout $env:FRAMEWORK_REF
+
+      - name: 应用 Core 补丁
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git -C framework apply --check "$env:GITHUB_WORKSPACE/core/0001-damage-chain-integration.patch"
+          git -C framework apply "$env:GITHUB_WORKSPACE/core/0001-damage-chain-integration.patch"
+          New-Item -ItemType Directory -Path framework/plugins/AnomalyDamageChain -Force | Out-Null
+          Copy-Item plugin/plugin.cpp    framework/plugins/AnomalyDamageChain/plugin.cpp -Force
+          Copy-Item plugin/manifest.json framework/plugins/AnomalyDamageChain/manifest.json -Force
+
+      - name: 配置并构建框架
+        shell: pwsh
+        working-directory: framework
+        run: |
+          cmake --preset windows-vs2022
+          cmake --build --preset windows-relwithdebinfo --parallel
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: anomaly-runtime-x64
+          path: framework/.build/windows-vs2022/**/Anomaly.Core.dll
+          if-no-files-found: warn
