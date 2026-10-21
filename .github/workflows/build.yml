@@ -13,7 +13,7 @@ on:
 
 env:
   FRAMEWORK_REPO: https://github.com/Rabb1t79/Anomaly-main.git
-  FRAMEWORK_REF: c64a2a39
+  FRAMEWORK_REF: main
 
 jobs:
   plugin:
